@@ -5,6 +5,8 @@
 #include <esp_camera.h>
 #include <HTTPClient.h> // For making API calls to AvalAI
 #include "Base64.h"     // For Base64 encoding images
+#include <FS.h>         // Required for file system operations (SPIFFS)
+#include <SPIFFS.h>     // For SPIFFS file system
 
 // Include camera pins definitions. This file is crucial for mapping camera signals to ESP32 GPIOs.
 // Ensure camera_pins.h is in the same directory as this sketch or properly included in your project.
@@ -101,157 +103,31 @@ bool setupCamera() {
 }
 
 /**
- * @brief Handles the root URL ("/") and serves the main HTML page.
- * This page contains the form for delay and prompt input.
+ * @brief Handles the root URL ("/") and serves the main HTML page from SPIFFS.
  */
 void handleRoot() {
-    String html = R"raw(
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP32-CAM Environmental Monitor</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        body { font-family: 'Inter', sans-serif; }
-        .spinner {
-            border: 4px solid rgba(0, 0, 0, 0.1);
-            width: 36px;
-            height: 36px;
-            border-radius: 50%;
-            border-left-color: #0d6efd;
-            animation: spin 1s ease infinite;
-        }
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-    </style>
-</head>
-<body class="bg-gradient-to-br from-blue-100 to-indigo-200 min-h-screen flex items-center justify-center p-4">
-    <div class="bg-white p-8 rounded-xl shadow-2xl w-full max-w-2xl border-t-4 border-indigo-500">
-        <h1 class="text-4xl font-extrabold text-gray-900 mb-6 text-center">
-            📸 ESP32-CAM AI Monitor
-        </h1>
-        <p class="text-gray-600 mb-8 text-center">
-            Capture environmental changes and get AI-powered insights.
-        </p>
-
-        <form id="monitorForm" class="space-y-6">
-            <div>
-                <label for="delay" class="block text-gray-700 text-sm font-semibold mb-2">
-                    Delay between images (seconds):
-                </label>
-                <input type="number" id="delay" name="delay" value="15" min="1" max="300"
-                       class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-200 ease-in-out shadow-sm"
-                       required>
-            </div>
-            <div>
-                <label for="prompt" class="block text-gray-700 text-sm font-semibold mb-2">
-                    GPT Prompt for Analysis:
-                </label>
-                <textarea id="prompt" name="prompt" rows="5"
-                          class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 transition duration-200 ease-in-out shadow-sm resize-y"
-                          placeholder="E.g., Compare the two images and tell me what changed in the room."
-                          required>The following two images were captured in the same room with a {delay}-second delay. Please analyze and describe: Any noticeable changes in objects or lighting. If any devices appear to have turned ON or OFF. Any signs of human or animal presence or movement. Any suspicious or unexpected changes. Please respond with a clear and concise summary.</textarea>
-            </div>
-            <button type="submit" id="submitBtn"
-                    class="w-full bg-indigo-600 text-white font-bold py-3 px-4 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-4 focus:ring-indigo-300 transition duration-300 ease-in-out transform hover:scale-105 shadow-lg">
-                Start Capture & Analyze
-            </button>
-        </form>
-
-        <div id="status" class="mt-8 p-4 bg-blue-50 text-blue-800 rounded-lg hidden">
-            <div class="flex items-center space-x-3">
-                <div class="spinner"></div>
-                <span id="statusMessage" class="font-medium"></span>
-            </div>
-        </div>
-
-        <div id="results" class="mt-8 p-6 bg-gray-50 rounded-xl shadow-inner hidden">
-            <h2 class="text-xl font-bold text-gray-800 mb-4">GPT Analysis Results:</h2>
-            <pre id="gptResponse" class="whitespace-pre-wrap text-gray-700 leading-relaxed"></pre>
-        </div>
-    </div>
-
-    <script>
-        document.getElementById('monitorForm').addEventListener('submit', async function(event) {
-            event.preventDefault(); // Prevent default form submission
-
-            const delay = document.getElementById('delay').value;
-            let promptText = document.getElementById('prompt').value;
-            // Replace placeholder in prompt text
-            promptText = promptText.replace('{delay}', delay);
-
-            const statusDiv = document.getElementById('status');
-            const statusMessage = document.getElementById('statusMessage');
-            const resultsDiv = document.getElementById('results');
-            const gptResponsePre = document.getElementById('gptResponse');
-            const submitBtn = document.getElementById('submitBtn');
-
-            // Show status, hide results
-            statusDiv.classList.remove('hidden');
-            resultsDiv.classList.add('hidden');
-            submitBtn.disabled = true; // Disable button during processing
-
-            statusMessage.textContent = 'Initiating capture process...';
-
-            try {
-                // Construct URL with parameters
-                const url = `/capture?delay=${delay}&prompt=${encodeURIComponent(promptText)}`;
-                
-                const response = await fetch(url);
-                const data = await response.json(); // Expect JSON response from ESP32
-
-                statusDiv.classList.add('hidden'); // Hide status spinner
-                submitBtn.disabled = false; // Re-enable button
-
-                if (data.status === 'success') {
-                    gptResponsePre.textContent = data.gpt_response;
-                    resultsDiv.classList.remove('hidden');
-                } else {
-                    gptResponsePre.textContent = `Error: ${data.message || 'Unknown error occurred.'}`;
-                    resultsDiv.classList.remove('hidden');
-                    resultsDiv.classList.add('bg-red-50', 'text-red-800'); // Style error
-                }
-
-            } catch (error) {
-                statusDiv.classList.add('hidden');
-                submitBtn.disabled = false;
-                resultsDiv.classList.remove('hidden');
-                resultsDiv.classList.add('bg-red-50', 'text-red-800');
-                gptResponsePre.textContent = `Failed to connect to ESP32: ${error.message}`;
-                console.error('Fetch error:', error);
-            }
-        });
-
-        // Function to update status message dynamically
-        function updateStatus(message) {
-            document.getElementById('statusMessage').textContent = message;
-        }
-
-        // Expose updateStatus to the global scope if needed for future direct calls from Arduino side (e.g. websockets)
-        window.updateStatus = updateStatus;
-    </script>
-</body>
-</html>
-)raw";
-    server.send(200, "text/html", html);
+    File file = SPIFFS.open("/index.html", "r");
+    if (!file) {
+        server.send(500, "text/plain", "Failed to open index.html");
+        Serial.println("Failed to open index.html from SPIFFS.");
+        return;
+    }
+    server.streamFile(file, "text/html");
+    file.close();
 }
 
 /**
- * @brief Handles the '/capture' URL. Triggers image capture, GPT analysis, and sends back results.
+ * @brief Handles the '/capture_images' URL. Triggers image capture and sends back Base64 encoded images.
  */
-void handleCapture() {
-    Serial.println("Capture request received on web server.");
+void handleCaptureImages() {
+    Serial.println("Capture images request received.");
 
-    // Extract delay parameter
     if (!server.hasArg("delay")) {
         server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"delay parameter missing.\"}");
         Serial.println("Error: delay parameter missing in request.");
         return;
     }
+
     int delaySeconds = server.arg("delay").toInt();
     if (delaySeconds <= 0) {
         server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid delay value. Must be positive.\"}");
@@ -259,15 +135,7 @@ void handleCapture() {
         return;
     }
 
-    // Extract prompt parameter
-    if (!server.hasArg("prompt")) {
-        server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"prompt parameter missing.\"}");
-        Serial.println("Error: prompt parameter missing in request.");
-        return;
-    }
-    String gptPrompt = server.arg("prompt");
-
-    Serial.printf("Delay: %d seconds, Prompt: \"%s\"\n", delaySeconds, gptPrompt.c_str());
+    Serial.printf("Delay for capture: %d seconds\n", delaySeconds);
 
     // --- Capture First Image ---
     Serial.println("[INFO] Capturing first image...");
@@ -296,7 +164,78 @@ void handleCapture() {
     esp_camera_fb_return(fb2);
     Serial.println("[INFO] Image #2 captured successfully.");
 
-    // --- Send to GPT via AvalAI API ---
+    // Send Base64 images back to the client
+    String jsonResponse = "{\"status\":\"success\",\"image1\":\"";
+    jsonResponse += image1Base64;
+    jsonResponse += "\",\"image2\":\"";
+    jsonResponse += image2Base64;
+    jsonResponse += "\"}";
+    server.send(200, "application/json", jsonResponse);
+    Serial.println("Images sent to client.");
+}
+
+/**
+ * @brief Handles the '/analyze_gpt' URL. Receives images and prompt, then calls GPT API.
+ */
+void handleAnalyzeGPT() {
+    Serial.println("Analyze GPT request received.");
+
+    if (!server.hasArg("plain")) { // Check if POST body is available
+        server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Request body missing.\"}");
+        Serial.println("Error: Request body missing.");
+        return;
+    }
+
+    String requestBody = server.arg("plain");
+    Serial.printf("Request Body: %s\n", requestBody.c_str());
+
+    // Basic parsing to extract image data and prompt
+    // For more robust parsing, consider using ArduinoJson library.
+    String image1Base64;
+    String image2Base64;
+    String gptPrompt;
+
+    // Example simple parsing (assumes fixed key names and structure)
+    // Find "image1" value
+    int img1_key_idx = requestBody.indexOf("\"image1\":\"");
+    if (img1_key_idx != -1) {
+        int img1_val_start = img1_key_idx + String("\"image1\":\"").length();
+        int img1_val_end = requestBody.indexOf("\"", img1_val_start);
+        if (img1_val_end != -1) {
+            image1Base64 = requestBody.substring(img1_val_start, img1_val_end);
+        }
+    }
+
+    // Find "image2" value
+    int img2_key_idx = requestBody.indexOf("\"image2\":\"");
+    if (img2_key_idx != -1) {
+        int img2_val_start = img2_key_idx + String("\"image2\":\"").length();
+        int img2_val_end = requestBody.indexOf("\"", img2_val_start);
+        if (img2_val_end != -1) {
+            image2Base64 = requestBody.substring(img2_val_start, img2_val_end);
+        }
+    }
+    
+    // Find "prompt" value
+    int prompt_key_idx = requestBody.indexOf("\"prompt\":\"");
+    if (prompt_key_idx != -1) {
+        int prompt_val_start = prompt_key_idx + String("\"prompt\":\"").length();
+        int prompt_val_end = requestBody.indexOf("\"", prompt_val_start);
+        if (prompt_val_end != -1) {
+            gptPrompt = requestBody.substring(prompt_val_start, prompt_val_end);
+            // Replace escaped characters in prompt if any
+            gptPrompt.replace("\\n", "\n");
+            gptPrompt.replace("\\\"", "\"");
+            gptPrompt.replace("\\t", "\t");
+        }
+    }
+
+    if (image1Base64.isEmpty() || image2Base64.isEmpty() || gptPrompt.isEmpty()) {
+        server.send(400, "application/json", "{\"status\":\"error\",\"message\":\"Missing image data or prompt in request.\"}");
+        Serial.println("Error: Missing image data or prompt in request.");
+        return;
+    }
+
     Serial.println("[INFO] Sending data to GPT via AvalAI API...");
     HTTPClient http;
     // AvalAI GPT API endpoint for chat completions
@@ -305,10 +244,15 @@ void handleCapture() {
     // Ensure the API Key is set as a Bearer token
     http.addHeader("Authorization", "Bearer " + String(avalaiApiKey));
 
+    // Construct the JSON payload for GPT
     String httpRequestData = "{\"model\": \"gpt-3.5-turbo-vision\", \"messages\": [";
+    
+    // Add the SYSTEM role message FIRST
+    httpRequestData += "{\"role\": \"system\", \"content\": \"You are an environmental monitoring AI. Analyze provided images and respond precisely as requested by the user, adhering to specified output formats and instructions.\" },";
+
+    // Then add the USER role message with the dynamically generated prompt and images
     httpRequestData += "{\"role\": \"user\", \"content\": [";
     httpRequestData += "{\"type\": \"text\", \"text\": \"" + gptPrompt + "\"},";
-    // Base64 images need to be prefixed with "data:image/jpeg;base64,"
     httpRequestData += "{\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/jpeg;base64," + image1Base64 + "\"}},";
     httpRequestData += "{\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/jpeg;base64," + image2Base64 + "\"}}";
     httpRequestData += "]}]}";
@@ -322,19 +266,18 @@ void handleCapture() {
         Serial.printf("[INFO] GPT Raw Response: %s\n", response.c_str());
 
         // Simple parsing of JSON response for "content" from "choices" array
-        // This parsing is basic and assumes a simple structure. For robust parsing, use a JSON library like ArduinoJson.
         int contentStartIndex = response.indexOf("\"content\":\"");
         if (contentStartIndex != -1) {
             contentStartIndex += String("\"content\":\"").length();
             int contentEndIndex = response.indexOf("\"", contentStartIndex);
             if (contentEndIndex != -1) {
                 gptResponseText = response.substring(contentStartIndex, contentEndIndex);
-                // Replace escaped newlines for display
+                // Replace escaped characters for display
                 gptResponseText.replace("\\n", "\n");
                 gptResponseText.replace("\\\"", "\"");
                 gptResponseText.replace("\\t", "\t");
-                Serial.println("[INFO] Parsed GPT Response:");
-                Serial.println(gptResponseText);
+                // The prompt might also include characters that need escaping when putting back in JSON
+                // However, for display on client, these unescaped versions are better.
             }
         }
     } else {
@@ -345,12 +288,17 @@ void handleCapture() {
 
     // Send JSON response back to the web client
     String jsonResponse = "{\"status\":\"success\",\"gpt_response\":\"";
+    // Ensure gptResponseText is properly escaped for JSON transmission
+    gptResponseText.replace("\"", "\\\""); // Escape double quotes
+    gptResponseText.replace("\n", "\\n");  // Escape newlines
+    gptResponseText.replace("\r", "");     // Remove carriage returns
     jsonResponse += gptResponseText;
     jsonResponse += "\"}";
     server.send(200, "application/json", jsonResponse);
 
-    Serial.println("Operation complete. Ready for next command.");
+    Serial.println("GPT analysis complete, response sent to client.");
 }
+
 
 /**
  * @brief Main setup function, runs once on boot.
@@ -359,6 +307,13 @@ void setup() {
     Serial.begin(115200);
     Serial.setDebugOutput(true); // Enable debug output for detailed logs
     Serial.println("\n");
+
+    // Initialize SPIFFS file system
+    if (!SPIFFS.begin(true)) { // true will format SPIFFS if mount fails
+        Serial.println("An Error has occurred while mounting SPIFFS");
+        return;
+    }
+    Serial.println("SPIFFS mounted successfully.");
 
     // Initialize camera
     if (!setupCamera()) {
@@ -387,12 +342,58 @@ void setup() {
     Serial.println(WiFi.localIP());
 
     // Setup web server routes
-    server.on("/", handleRoot);          // Serve the main HTML page
-    server.on("/capture", HTTP_GET, handleCapture); // Handle image capture and analysis requests
+    server.on("/", HTTP_GET, handleRoot);                // Serve the main HTML page from SPIFFS
+    server.on("/script.js", HTTP_GET, []() {             // Serve script.js from SPIFFS
+        File file = SPIFFS.open("/script.js", "r");
+        if (!file) {
+            server.send(500, "text/plain", "Failed to open script.js");
+            Serial.println("Failed to open script.js from SPIFFS.");
+            return;
+        }
+        server.streamFile(file, "application/javascript");
+        file.close();
+    });
+    server.on("/capture_images", HTTP_GET, handleCaptureImages); // Handle image capture request
+    server.on("/analyze_gpt", HTTP_POST, handleAnalyzeGPT);   // Handle GPT analysis request (expects POST with JSON)
+
+    // Handle any other file requests by trying to serve them from SPIFFS (e.g., CSS, images)
+    server.onNotFound([]() {
+        if (!handleFileRead(server.uri())) {
+            server.send(404, "text/plain", "File Not Found");
+        }
+    });
 
     // Start web server
     server.begin();
     Serial.println("HTTP server started.");
+}
+
+/**
+ * @brief Helper function to serve files from SPIFFS.
+ * @param path The path of the file to serve.
+ * @return True if the file was found and served, false otherwise.
+ */
+bool handleFileRead(String path) {
+    if (path.endsWith("/")) path += "index.html"; // Serve index.html for root directory
+    String contentType = "text/plain"; // Default content type
+    if (path.endsWith(".html")) contentType = "text/html";
+    else if (path.endsWith(".css")) contentType = "text/css";
+    else if (path.endsWith(".js")) contentType = "application/javascript";
+    else if (path.endsWith(".png")) contentType = "image/png";
+    else if (path.endsWith(".jpg")) contentType = "image/jpeg";
+    else if (path.endsWith(".gif")) contentType = "image/gif";
+    else if (path.endsWith(".ico")) contentType = "image/x-icon";
+    else if (path.endsWith(".svg")) contentType = "image/svg+xml";
+
+    if (SPIFFS.exists(path)) {
+        File file = SPIFFS.open(path, "r");
+        if (file) {
+            server.streamFile(file, contentType);
+            file.close();
+            return true;
+        }
+    }
+    return false; // File not found or couldn't be opened
 }
 
 /**
@@ -403,43 +404,3 @@ void loop() {
     server.handleClient(); // Process any pending HTTP requests
     delay(10); // Small delay to prevent watchdog timer from resetting the board
 }
-```
-
-
-```c
-#ifndef CAMERA_PINS_H
-#define CAMERA_PINS_H
-
-// This header defines the GPIO pins for the ESP32-CAM (AI-Thinker model)
-// It's crucial for the camera module to function correctly.
-
-// Power Down and Reset pins
-#define PWDN_GPIO_NUM     32
-#define RESET_GPIO_NUM    -1 // -1 means not connected / not used
-
-// SCCB (Serial Camera Control Bus) pins for I2C communication with the camera sensor
-#define SIOD_GPIO_NUM     26 // SDA
-#define SIOC_GPIO_NUM     27 // SCL
-
-// XCLK (External Clock) pin
-#define XCLK_GPIO_NUM      0
-
-// Data pins (D0-D7) - These receive the image pixel data
-#define Y9_GPIO_NUM       35
-#define Y8_GPIO_NUM       34
-#define Y7_GPIO_NUM       39
-#define Y6_GPIO_NUM       36
-#define Y5_GPIO_NUM       21
-#define Y4_GPIO_NUM       19
-#define Y3_GPIO_NUM       18
-#define Y2_GPIO_NUM        5
-
-// Synchronization and Pixel Clock pins
-#define VSYNC_GPIO_NUM    25 // Vertical Sync
-#define HREF_GPIO_NUM     23 // Horizontal Reference
-#define PCLK_GPIO_NUM     22 // Pixel Clock
-
-// Optional: LED Flash pin (if your board has one connected)
-// #define LED_GPIO_NUM      4 // Example for some ESP32-CAM boards
-
-#endif // CAMERA_PINS_H
